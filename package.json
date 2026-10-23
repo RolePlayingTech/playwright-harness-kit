@@ -1,0 +1,37 @@
+{
+  "name": "playwright-harness-kit",
+  "version": "1.0.0",
+  "description": "Record, explain, check and generate agent skills for a Playwright & multimodal browser verification contract: tiers, scenario IDs, auth token rotation policy, and hybrid ARIA + VLM visual rubrics.",
+  "type": "module",
+  "bin": {
+    "playwright-harness": "./bin/playwright-harness.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test tests/check.test.mjs tests/build.test.mjs tests/cli.test.mjs",
+    "check": "node bin/playwright-harness.mjs check examples/mumro-web --strict",
+    "explain": "node bin/playwright-harness.mjs explain examples/mumro-web",
+    "build:dry-run": "node bin/playwright-harness.mjs build examples/mumro-web --dry-run"
+  },
+  "keywords": [
+    "playwright",
+    "playwright-mcp",
+    "browser-automation",
+    "agent-skills",
+    "multimodal-verification",
+    "ui-contract"
+  ],
+  "author": "RolePlayingTech (MUMRO Academy, https://academy.mumro.io)",
+  "license": "MIT",
+  "homepage": "https://github.com/RolePlayingTech/playwright-harness-kit#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RolePlayingTech/playwright-harness-kit.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "name": "mumro-web-verification",
+  "purpose": "Two-tier Playwright & multimodal browser verification for workspace auth, shell geometry, and composer flows.",
+  "copySkillsTo": [".claude/skills"],
+  "tiers": {
+    "ui-contract": {
+      "command": "npm --prefix frontend run test:e2e:contract",
+      "origin": "https://mumro-ui-contract.invalid",
+      "networkPolicy": "deny-unhandled",
+      "purpose": "Fast, deterministic verification of routes, auth refresh queues, and 390x844 mobile geometry without external services."
+    },
+    "integrated": {
+      "command": "npm --prefix frontend run test:e2e:integrated",
+      "origin": "http://localhost:5173",
+      "networkPolicy": "local-stack-only",
+      "purpose": "End-to-end journeys against local frontend + backend with disposable QA accounts (QA-A / QA-B)."
+    }
+  },
+  "authSessionPolicy": {
+    "singleUseRefreshRotation": true,
+    "allowSharedStorageState": false,
+    "rationale": "Concurrent workers sharing one single-use refresh token trigger reuse detection and revoke the session family."
+  },
+  "artifactHygiene": {
+    "traceMode": "on-first-retry",
+    "gitIgnore": ["playwright-report/", "test-results/", "playwright/.auth/"],
+    "forbidLiveMutations": true
+  },
+  "scenarios": [
+    {
+      "id": "M-AUTH-01",
+      "title": "Silent refresh single-flight under concurrent 401 responses",
+      "tier": "ui-contract",
+      "spec": "frontend/e2e/ui-contract/auth-session.spec.ts",
+      "locatorStrategy": "role-and-label-first",
+      "visualCheck": { "required": false }
+    },
+    {
+      "id": "M-UX-01",
+      "title": "Mobile shell drawer and dialog overflow check (390x844)",
+      "tier": "ui-contract",
+      "spec": "frontend/e2e/ui-contract/ux-shell-mobile.spec.ts",
+      "locatorStrategy": "role-and-label-first",
+      "visualCheck": {
+        "required": true,
+        "viewports": [{ "width": 390, "height": 844 }, { "width": 1280, "height": 800 }],
+        "programmaticInvariants": [
+          "documentElement.scrollWidth <= window.innerWidth",
+          "dialog close button inside viewport boundingBox"
+        ],
+        "multimodalRubric": [
+          "No overlapping badges or clipped headings in the mobile drawer",
+          "Primary action button remains visually distinct and unobstructed"
+        ]
+      }
+    },
+    {
+      "id": "M-COMPOSE-01",
+      "title": "Workspace draft creation and Prepare -> Confirm preview modal",
+      "tier": "integrated",
+      "spec": "frontend/e2e/integrated/compose-prepare-confirm.spec.ts",
+      "locatorStrategy": "role-and-label-first",
+      "visualCheck": { "required": false }
+    }
+  ],
+  "skills": [
+    {
+      "name": "verify-browser-scenarios",
+      "description": "Verify UI-contract and integrated Playwright scenarios with ARIA locators, DOM geometry invariants, and targeted VLM screenshots. Use when an issue or task packet references M-AUTH-01, M-UX-01, or M-COMPOSE-01.",
+      "covers": ["M-AUTH-01", "M-UX-01", "M-COMPOSE-01"]
+    }
+  ]
+}

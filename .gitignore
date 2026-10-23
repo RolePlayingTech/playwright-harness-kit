@@ -1,0 +1,5 @@
+node_modules/
+.playwright-harness/skills/
+.agents/
+.claude/
+*.log
