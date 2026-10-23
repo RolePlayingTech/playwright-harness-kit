@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Workspace Recovery &amp; Release Drawer — Offline UI Contract Demo</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, sans-serif;
+        color: #0f172a;
+        background: #f8fafc;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+      }
+      .card {
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 8px;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      input[type="email"] {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #94a3b8;
+        border-radius: 8px;
+        font-size: 1rem;
+        margin-bottom: 12px;
+      }
+      button {
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid #0f172a;
+        background: #0f172a;
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #ffffff;
+        color: #0f172a;
+      }
+      [role="alert"] {
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #fef2f2;
+        border: 1px solid #ef4444;
+        color: #991b1b;
+      }
+      .drawer-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .schedule-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        margin-top: 12px;
+        font-size: 0.9rem;
+      }
+      /* Intentional CSS bug activated only in broken mode: rigid 540px width overflows 390px mobile viewport */
+      body[data-ui-mode="broken"] .drawer-card {
+        min-width: 540px;
+      }
+    </style>
+  </head>
+  <body data-ui-mode="fixed">
+    <main>
+      <section class="card" aria-labelledby="recovery-heading">
+        <h1 id="recovery-heading">Reset workspace password</h1>
+        <form id="recovery-form" novalidate>
+          <label for="email-input">Email</label>
+          <input id="email-input" name="email" type="email" autocomplete="email" required />
+          <button type="submit">Send reset link</button>
+        </form>
+        <div id="recovery-alert" role="alert" hidden></div>
+      </section>
+
+      <aside class="card drawer-card" role="dialog" aria-labelledby="drawer-heading">
+        <div class="drawer-header">
+          <h2 id="drawer-heading" style="margin: 0; font-size: 1.05rem;">Release schedule preview</h2>
+          <button type="button" class="secondary" id="close-drawer-btn">Close drawer</button>
+        </div>
+        <div class="schedule-row">
+          <span>Track 04 · Browser verification contract</span>
+          <strong>Ready for QA</strong>
+        </div>
+      </aside>
+    </main>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const mode = params.get('mode') === 'broken' ? 'broken' : 'fixed';
+      document.body.setAttribute('data-ui-mode', mode);
+
+      const form = document.getElementById('recovery-form');
+      const emailInput = document.getElementById('email-input');
+      const alertBox = document.getElementById('recovery-alert');
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const email = emailInput.value;
+        if (mode === 'broken') {
+          // Bug 1a: prematurely clears the user's typed input before knowing if the server succeeded
+          emailInput.value = '';
+        }
+        const response = await fetch('/api/auth/password/forgot', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        if (!response.ok) {
+          alertBox.hidden = false;
+          alertBox.textContent =
+            'Service temporarily unavailable (HTTP ' +
+            response.status +
+            '). Verify your email and try again when the recovery service is back.';
+          if (mode === 'broken') {
+            // Bug 1b: unapproved automatic background retry on HTTP 503
+            setTimeout(() => {
+              fetch('/api/auth/password/forgot', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ email }),
+              }).catch(() => {});
+            }, 50);
+          }
+        }
+      });
+    </script>
+  </body>
+</html>

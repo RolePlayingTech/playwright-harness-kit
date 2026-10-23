@@ -19,12 +19,40 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: Run unit, build and CLI tests
+      - name: Run unit, build, prune and CLI tests
         run: npm test
-      - name: Validate example Playwright verification contract (strict mode)
+      - name: Validate example Playwright verification contracts (strict + verify-files)
         run: npm run check
       - name: Verify example explain and dry-run build
         run: |
           npm run explain
           npm run build:dry-run
           npm pack --dry-run
+
+  smoke-offline-ui:
+    name: Runnable Offline UI Playwright Lab (broken -> fixed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate contract and repository evidence in examples/offline-ui
+        run: |
+          node bin/playwright-harness.mjs check examples/offline-ui --strict --verify-files
+          node bin/playwright-harness.mjs build examples/offline-ui --prune
+      - name: Install Playwright in examples/offline-ui
+        working-directory: examples/offline-ui
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Verify intentional UI bugs fail the Playwright contract (broken mode)
+        working-directory: examples/offline-ui
+        run: |
+          if npm run test:e2e:broken; then
+            echo "Expected broken mode to fail M-AUTH-01 and M-UX-01 assertions, but it passed"
+            exit 1
+          fi
+      - name: Verify repaired UI passes all Playwright contract assertions (fixed mode)
+        working-directory: examples/offline-ui
+        run: npm run test:e2e:contract

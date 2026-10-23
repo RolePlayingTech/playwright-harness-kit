@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizeSpec } from '../src/spec.mjs';
-import { applyBuild, planBuild, renderSkill, verifyManagedContent } from '../src/build.mjs';
+import { applyBuild, findStaleSkills, planBuild, renderSkill, verifyManagedContent } from '../src/build.mjs';
 
 const RAW_SPEC = {
   name: 'mumro-web',
   purpose: 'Browser verification contract.',
+  copySkillsTo: ['.claude/skills', '.cursor/skills'],
   tiers: {
     'ui-contract': {
       command: 'npm run test:contract',
@@ -56,6 +58,7 @@ test('renderSkill embeds verifiable SHA-256 marker and hybrid workflow instructi
   const md = renderSkill(spec, spec.skills[0]);
   assert.match(md, /<!-- playwright-harness-kit:managed sha256=[a-f0-9]{64} -->/);
   assert.ok(md.includes('Hybrid visual check at `390x844`'));
+  assert.ok(md.includes('Responsibility boundary:'));
   const verified = verifyManagedContent(md);
   assert.deepEqual(verified, { managed: true, unedited: true });
 });
@@ -63,7 +66,7 @@ test('renderSkill embeds verifiable SHA-256 marker and hybrid workflow instructi
 test('planBuild and applyBuild detect conflicts on hand-edited skills and respect --force', () => {
   const dir = mkdtempSync(join(tmpdir(), 'pw-harness-build-'));
   try {
-    const spec = normalizeSpec(RAW_SPEC);
+    const spec = normalizeSpec({ ...RAW_SPEC, copySkillsTo: [] });
     const planned1 = planBuild(spec, dir);
     assert.equal(planned1.counts.create, 1);
     applyBuild(planned1);
@@ -82,6 +85,92 @@ test('planBuild and applyBuild detect conflicts on hand-edited skills and respec
     assert.equal(plannedForce.counts.update, 1);
     applyBuild(plannedForce, { force: true });
     assert.deepEqual(verifyManagedContent(readFileSync(skillPath, 'utf8')), { managed: true, unedited: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('detects and safely prunes stale skills when a skill is renamed or copySkillsTo target is removed, preserving manual skills', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-harness-prune-'));
+  try {
+    // 1. Initial build writes to .playwright-harness/skills, .claude/skills, and .cursor/skills
+    const spec1 = normalizeSpec(RAW_SPEC);
+    const planned1 = planBuild(spec1, dir);
+    assert.equal(planned1.counts.create, 3);
+    applyBuild(planned1);
+
+    // Create an unrelated manual skill in .claude/skills/manual-review/SKILL.md
+    const manualSkillDir = join(dir, '.claude/skills/manual-review');
+    mkdirSync(manualSkillDir, { recursive: true });
+    const manualSkillPath = join(manualSkillDir, 'SKILL.md');
+    writeFileSync(manualSkillPath, '---\nname: manual-review\ndescription: Manual skill.\n---\n# Manual\n', 'utf8');
+
+    // 2. Rename skill to "verify-browser-v2" and remove ".cursor/skills" from copySkillsTo
+    const spec2 = normalizeSpec({
+      ...RAW_SPEC,
+      copySkillsTo: ['.claude/skills'],
+      skills: [
+        {
+          name: 'verify-browser-v2',
+          description: 'Run UI contract scenarios v2. Use when verifying M-UX-01.',
+          covers: ['M-UX-01'],
+        },
+      ],
+    });
+
+    const staleDetected = findStaleSkills(spec2, dir);
+    assert.equal(staleDetected.length, 2 + 1); // .playwright-harness/skills, .claude/skills, and .cursor/skills
+    assert.deepEqual(
+      staleDetected.map((s) => s.relPath),
+      [
+        '.claude/skills/verify-ui-contract/SKILL.md',
+        '.cursor/skills/verify-ui-contract/SKILL.md',
+        '.playwright-harness/skills/verify-ui-contract/SKILL.md',
+      ]
+    );
+
+    // 3. Hand-edit one stale skill (.cursor/skills/verify-ui-contract/SKILL.md) -> should trigger conflict on prune without --force
+    const cursorStalePath = join(dir, '.cursor/skills/verify-ui-contract/SKILL.md');
+    writeFileSync(cursorStalePath, readFileSync(cursorStalePath, 'utf8') + '\nCustom note\n', 'utf8');
+
+    const plannedPruneConflict = planBuild(spec2, dir, { prune: true });
+    assert.equal(plannedPruneConflict.counts.conflict, 1);
+    assert.equal(plannedPruneConflict.counts.prune, 2);
+    assert.throws(() => applyBuild(plannedPruneConflict), /Refusing to overwrite conflicting skill file/);
+
+    // Restore intact content on .cursor/skills/verify-ui-contract/SKILL.md and test rollback on mid-apply I/O failure
+    applyBuild(planBuild(spec1, dir, { force: true }), { force: true });
+    const plannedPrune = planBuild(spec2, dir, { prune: true });
+    assert.equal(plannedPrune.counts.create, 2);
+    assert.equal(plannedPrune.counts.prune, 3);
+    assert.equal(plannedPrune.counts.conflict, 0);
+
+    // Simulate I/O failure on the final operation -> all pruned files must be restored
+    let writeCalls = 0;
+    const failingIo = {
+      ...fs,
+      writeFileSync(target, data, ...rest) {
+        writeCalls += 1;
+        if (writeCalls === 2) {
+          throw new Error('simulated disk full');
+        }
+        return fs.writeFileSync(target, data, ...rest);
+      },
+    };
+    assert.throws(() => applyBuild(plannedPrune, { io: failingIo }), /prior file state restored/);
+    assert.equal(existsSync(join(dir, '.claude/skills/verify-ui-contract/SKILL.md')), true);
+    assert.equal(existsSync(join(dir, '.cursor/skills/verify-ui-contract/SKILL.md')), true);
+
+    // 4. Now apply prune cleanly
+    const freshPlanPrune = planBuild(spec2, dir, { prune: true });
+    applyBuild(freshPlanPrune);
+
+    assert.equal(existsSync(join(dir, '.claude/skills/verify-ui-contract/SKILL.md')), false);
+    assert.equal(existsSync(join(dir, '.cursor/skills/verify-ui-contract/SKILL.md')), false);
+    assert.equal(existsSync(join(dir, '.playwright-harness/skills/verify-ui-contract/SKILL.md')), false);
+    assert.equal(existsSync(join(dir, '.claude/skills/verify-browser-v2/SKILL.md')), true);
+    // Unrelated manual skill is still intact
+    assert.equal(existsSync(manualSkillPath), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
