@@ -30,8 +30,8 @@ test('CLI explain outputs tiers, scenarios, skills, and evidence scope', () => {
   const res = run(['explain', OFFLINE_EXAMPLE_DIR, '--verify-files']);
   assert.equal(res.code, 0);
   assert.ok(res.text.includes('Playwright verification contract: offline-ui-verification'));
-  assert.ok(res.text.includes('M-AUTH-01'));
-  assert.ok(res.text.includes('M-UX-01'));
+  assert.ok(res.text.includes('DEMO-AUTH-01'));
+  assert.ok(res.text.includes('DEMO-UX-01'));
   assert.ok(res.text.includes('verify-browser-scenarios'));
   assert.ok(res.text.includes('Evidence scope (static contract vs. runtime browser execution)'));
 });

@@ -175,3 +175,86 @@ test('detects and safely prunes stale skills when a skill is renamed or copySkil
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('never deletes README.md, package.json, src/app.js, docs/notes.md, nested non-skill paths, or unmanaged SKILL.md injected into .managed-manifest.json even with --prune --force', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-harness-manifest-bound-'));
+  try {
+    const spec1 = normalizeSpec(RAW_SPEC);
+    applyBuild(planBuild(spec1, dir));
+
+    // Create unrelated repository files and a manual skill without ownership header
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    mkdirSync(join(dir, '.claude/skills/nested/sub'), { recursive: true });
+    mkdirSync(join(dir, '.claude/skills/manual-unmanaged'), { recursive: true });
+
+    const protectedPaths = [
+      'README.md',
+      'package.json',
+      'src/app.js',
+      'docs/notes.md',
+      '.claude/skills/nested/sub/SKILL.md',
+      '.claude/skills/manual-unmanaged/SKILL.md',
+    ];
+    for (const rel of protectedPaths) {
+      writeFileSync(join(dir, rel), `unmanaged content of ${rel}\n`, 'utf8');
+    }
+
+    // Tamper with .playwright-harness/.managed-manifest.json by injecting all protected paths
+    const manifestPath = join(dir, '.playwright-harness/.managed-manifest.json');
+    writeFileSync(
+      manifestPath,
+      JSON.stringify(
+        {
+          targetRoots: ['.playwright-harness/skills', '.claude/skills', '.cursor/skills', 'src'],
+          managedFiles: [
+            ...protectedPaths,
+            '.claude/skills/verify-ui-contract/SKILL.md',
+            '.cursor/skills/verify-ui-contract/SKILL.md',
+            '.playwright-harness/skills/verify-ui-contract/SKILL.md',
+          ],
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    // Rename skill in spec so verify-ui-contract is genuinely stale, and run planBuild + applyBuild with { prune: true, force: true }
+    const spec2 = normalizeSpec({
+      ...RAW_SPEC,
+      copySkillsTo: ['.claude/skills'],
+      skills: [
+        {
+          name: 'verify-browser-v2',
+          description: 'Run UI contract scenarios v2. Use when verifying M-UX-01.',
+          covers: ['M-UX-01'],
+        },
+      ],
+    });
+
+    const planned = planBuild(spec2, dir, { prune: true, force: true });
+    // Diagnostics must flag every untrusted/unmanaged manifest entry
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('README.md')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('package.json')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('src/app.js')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('docs/notes.md')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/nested/sub/SKILL.md')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/manual-unmanaged/SKILL.md')));
+
+    applyBuild(planned, { force: true });
+
+    // Every single protected file must survive untouched
+    for (const rel of protectedPaths) {
+      assert.equal(existsSync(join(dir, rel)), true, `Protected file "${rel}" must survive build --prune --force`);
+      assert.equal(readFileSync(join(dir, rel), 'utf8'), `unmanaged content of ${rel}\n`);
+    }
+
+    // Legitimate stale managed skills were still pruned
+    assert.equal(existsSync(join(dir, '.claude/skills/verify-ui-contract/SKILL.md')), false);
+    assert.equal(existsSync(join(dir, '.cursor/skills/verify-ui-contract/SKILL.md')), false);
+    assert.equal(existsSync(join(dir, '.playwright-harness/skills/verify-ui-contract/SKILL.md')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

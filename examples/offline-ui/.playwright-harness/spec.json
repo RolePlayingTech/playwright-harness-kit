@@ -1,6 +1,6 @@
 {
   "name": "offline-ui-verification",
-  "purpose": "Self-contained offline Playwright ui-contract and mobile geometry verification lab.",
+  "purpose": "Self-contained offline Playwright ui-contract, DOM geometry, and screenshot rubric verification lab.",
   "copySkillsTo": [".claude/skills"],
   "tiers": {
     "ui-contract": {
@@ -22,7 +22,7 @@
   },
   "scenarios": [
     {
-      "id": "M-AUTH-01",
+      "id": "DEMO-AUTH-01",
       "title": "Password recovery HTTP 503 preserves typed email and makes zero background retries",
       "tier": "ui-contract",
       "spec": "e2e/ui-contract.spec.ts",
@@ -30,7 +30,7 @@
       "visualCheck": { "required": false }
     },
     {
-      "id": "M-UX-01",
+      "id": "DEMO-UX-01",
       "title": "Mobile release drawer fits 390x844 viewport without horizontal overflow or off-screen controls",
       "tier": "ui-contract",
       "spec": "e2e/ui-contract.spec.ts",
@@ -43,8 +43,10 @@
           "dialog close button inside viewport boundingBox"
         ],
         "multimodalRubric": [
-          "No overlapping badges or clipped headings in the mobile drawer",
-          "Primary action button remains visually distinct and unobstructed"
+          "Truncation: Heading and schedule row text remain uncut with no unplanned ellipsis",
+          "Occlusion: Close drawer button and status badge are not overlapped or clipped by adjacent elements",
+          "Alignment: Drawer header controls and schedule row align cleanly within the 390px card padding",
+          "Contrast: Alert banner (#991b1b on #fef2f2) and primary action button (#ffffff on #0f172a) remain legible"
         ]
       }
     }
@@ -52,8 +54,8 @@
   "skills": [
     {
       "name": "verify-browser-scenarios",
-      "description": "Verify UI-contract Playwright scenarios with ARIA locators, DOM geometry invariants, and targeted VLM screenshots. Use when an issue or task packet references M-AUTH-01 or M-UX-01.",
-      "covers": ["M-AUTH-01", "M-UX-01"]
+      "description": "Verify UI-contract Playwright scenarios with ARIA locators, DOM geometry invariants, and targeted screenshots. Use when an issue or task packet references DEMO-AUTH-01 or DEMO-UX-01.",
+      "covers": ["DEMO-AUTH-01", "DEMO-UX-01"]
     }
   ]
 }

@@ -163,33 +163,115 @@ ${steps.join('\n') || '1. No scenarios listed in `covers`. Add them in the spec.
   return rendered;
 }
 
-function readManagedManifest(root) {
+const DEFAULT_SKILL_ROOT = '.playwright-harness/skills';
+
+export function validateManagedManifestEntry(rawItem, allowedRoots = null) {
+  if (typeof rawItem !== 'string' || !rawItem.trim()) {
+    return { ok: false, error: 'entry must be a non-empty string' };
+  }
+  let normalized;
+  try {
+    normalized = normalizeRelPath(rawItem);
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+  const parts = normalized.split('/');
+  if (parts.length < 3 || parts[parts.length - 1] !== 'SKILL.md') {
+    return {
+      ok: false,
+      error: 'entry must match "<targetRoot>/<skill-name>/SKILL.md"',
+    };
+  }
+  const skillName = parts[parts.length - 2];
+  const nameErr = validateSkillName(skillName);
+  if (nameErr) {
+    return { ok: false, error: `invalid skill directory "${skillName}" (${nameErr})` };
+  }
+  const targetRoot = parts.slice(0, -2).join('/');
+  if (targetRoot !== DEFAULT_SKILL_ROOT) {
+    const rootErr = validateCopyTarget(targetRoot);
+    if (rootErr) {
+      return { ok: false, error: `untrusted target root "${targetRoot}" (${rootErr})` };
+    }
+  }
+  if (allowedRoots && !allowedRoots.has(targetRoot)) {
+    return {
+      ok: false,
+      error: `target root "${targetRoot}" is not in tracked targetRoots (${[...allowedRoots].join(', ')})`,
+    };
+  }
+  return { ok: true, relPath: normalized, targetRoot, skillName };
+}
+
+export function readManagedManifest(root, currentTargetRoots = [DEFAULT_SKILL_ROOT]) {
+  const diagnostics = [];
+  const baseAllowedRoots = new Set([DEFAULT_SKILL_ROOT, ...currentTargetRoots]);
   let manifestPath;
   try {
     manifestPath = safeJoin(root, MANAGED_MANIFEST_REL);
-  } catch {
-    return [];
+  } catch (error) {
+    diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}) is unsafe: ${error.message}`);
+    return { files: [], targetRoots: [...baseAllowedRoots], diagnostics };
   }
-  if (!existsSync(manifestPath)) return [];
+  if (!existsSync(manifestPath)) {
+    return { files: [], targetRoots: [...baseAllowedRoots], diagnostics };
+  }
+  let parsed;
   try {
-    const parsed = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    if (!parsed || !Array.isArray(parsed.managedFiles)) return [];
-    const valid = [];
-    for (const item of parsed.managedFiles) {
-      try {
-        valid.push(normalizeRelPath(String(item)));
-      } catch {
-        // Ignore malformed manifest entries
+    parsed = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}) is not valid JSON: ${error.message}`);
+    return { files: [], targetRoots: [...baseAllowedRoots], diagnostics };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}) must be a JSON object`);
+    return { files: [], targetRoots: [...baseAllowedRoots], diagnostics };
+  }
+  if (parsed.targetRoots !== undefined) {
+    if (!Array.isArray(parsed.targetRoots)) {
+      diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): "targetRoots" must be an array`);
+    } else {
+      for (const rawRoot of parsed.targetRoots) {
+        if (typeof rawRoot !== 'string' || !rawRoot.trim()) {
+          diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): invalid targetRoot ${JSON.stringify(rawRoot)}`);
+          continue;
+        }
+        try {
+          const normRoot = normalizeRelPath(rawRoot);
+          if (normRoot !== DEFAULT_SKILL_ROOT) {
+            const rootErr = validateCopyTarget(normRoot);
+            if (rootErr) {
+              diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): untrusted targetRoot "${rawRoot}" (${rootErr})`);
+              continue;
+            }
+          }
+          baseAllowedRoots.add(normRoot);
+        } catch (error) {
+          diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): unsafe targetRoot "${rawRoot}" (${error.message})`);
+        }
       }
     }
-    return valid;
-  } catch {
-    return [];
   }
+  if (!Array.isArray(parsed.managedFiles)) {
+    diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): "managedFiles" must be an array`);
+    return { files: [], targetRoots: [...baseAllowedRoots], diagnostics };
+  }
+  const valid = [];
+  for (const item of parsed.managedFiles) {
+    const check = validateManagedManifestEntry(item, baseAllowedRoots);
+    if (!check.ok) {
+      diagnostics.push(
+        `managed manifest (${MANAGED_MANIFEST_REL}): rejected untrusted entry ${JSON.stringify(item)} (${check.error})`
+      );
+      continue;
+    }
+    valid.push(check.relPath);
+  }
+  return { files: valid, targetRoots: [...baseAllowedRoots], diagnostics };
 }
 
 function collectTargetRoots(spec) {
-  const targetRoots = ['.playwright-harness/skills'];
+  const targetRoots = [DEFAULT_SKILL_ROOT];
   const seenRoots = new Set(targetRoots);
   for (const dest of spec.copySkillsTo || []) {
     const err = validateCopyTarget(dest);
@@ -209,7 +291,7 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
   try {
     targetRoots = collectTargetRoots(spec);
   } catch {
-    targetRoots = ['.playwright-harness/skills'];
+    targetRoots = [DEFAULT_SKILL_ROOT];
   }
 
   const expectedRelPaths = new Set();
@@ -220,9 +302,11 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
     }
   }
 
+  const manifest = readManagedManifest(root, targetRoots);
+  const allowedRootsSet = new Set(manifest.targetRoots);
+  const diagnostics = [...manifest.diagnostics];
   const candidateRelPaths = new Set();
-  const manifestSet = new Set(readManagedManifest(root));
-  for (const relPath of manifestSet) {
+  for (const relPath of manifest.files) {
     if (!expectedRelPaths.has(relPath)) {
       candidateRelPaths.add(relPath);
     }
@@ -269,6 +353,11 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
 
   const stale = [];
   for (const relPath of [...candidateRelPaths].sort()) {
+    const structCheck = validateManagedManifestEntry(relPath, allowedRootsSet);
+    if (!structCheck.ok) {
+      diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): skipped untrusted candidate "${relPath}" (${structCheck.error})`);
+      continue;
+    }
     let fullPath;
     try {
       fullPath = safeJoin(root, relPath);
@@ -279,7 +368,13 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
     const raw = readFileSync(fullPath);
     const current = normalizeText(raw.toString('utf8'));
     const ownership = verifyManagedContent(current);
-    if (ownership.managed && ownership.unedited) {
+    if (!ownership.managed) {
+      diagnostics.push(
+        `managed manifest (${MANAGED_MANIFEST_REL}): ignoring unmanaged file "${relPath}" (missing playwright-harness-kit ownership marker; refusing to delete even with --force)`
+      );
+      continue;
+    }
+    if (ownership.unedited) {
       stale.push({
         path: fullPath,
         relPath,
@@ -291,34 +386,33 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
         reason: 'stale managed skill removed from spec',
         diff: unifiedDiff(current, null, relPath),
       });
-    } else if (ownership.managed || manifestSet.has(relPath)) {
-      if (force) {
-        stale.push({
-          path: fullPath,
-          relPath,
-          contents: null,
-          raw,
-          before: current,
-          action: 'prune',
-          isStale: true,
-          reason: 'forced removal of modified stale skill',
-          diff: unifiedDiff(current, null, relPath),
-        });
-      } else {
-        stale.push({
-          path: fullPath,
-          relPath,
-          contents: null,
-          raw,
-          before: current,
-          action: 'conflict',
-          isStale: true,
-          reason: 'stale managed skill was modified by hand (pass --force with --prune to remove)',
-          diff: unifiedDiff(current, null, relPath),
-        });
-      }
+    } else if (force) {
+      stale.push({
+        path: fullPath,
+        relPath,
+        contents: null,
+        raw,
+        before: current,
+        action: 'prune',
+        isStale: true,
+        reason: 'forced removal of modified stale skill',
+        diff: unifiedDiff(current, null, relPath),
+      });
+    } else {
+      stale.push({
+        path: fullPath,
+        relPath,
+        contents: null,
+        raw,
+        before: current,
+        action: 'conflict',
+        isStale: true,
+        reason: 'stale managed skill was modified by hand (pass --force with --prune to remove)',
+        diff: unifiedDiff(current, null, relPath),
+      });
     }
   }
+  Object.defineProperty(stale, 'diagnostics', { value: diagnostics, enumerable: false });
   return stale;
 }
 
@@ -417,7 +511,12 @@ export function planBuild(spec, dir, { force = false, prune = false } = {}) {
   }
 
   Object.defineProperty(files, 'root', { value: root, enumerable: false });
+  Object.defineProperty(files, 'targetRoots', { value: targetRoots, enumerable: false });
   Object.defineProperty(files, 'stale', { value: stale, enumerable: false });
+  Object.defineProperty(files, 'manifestDiagnostics', {
+    value: stale.diagnostics || [],
+    enumerable: false,
+  });
   Object.defineProperty(files, 'conflicts', {
     value: files.filter((f) => f.action === 'conflict'),
     enumerable: false,
@@ -449,9 +548,20 @@ export function applyBuild(files, { dryRun = false, force = false, io } = {}) {
 
   const ops = writes.map((f) => {
     if (f.action === 'prune' || (force && f.action === 'conflict' && f.isStale)) {
+      const structCheck = validateManagedManifestEntry(f.relPath);
+      if (!structCheck.ok) {
+        throw new Error(`Refusing to delete untrusted path "${f.relPath}": ${structCheck.error}`);
+      }
+      const beforeBuf = f.raw ?? (existsSync(f.path) ? readFileSync(f.path) : null);
+      const beforeText = f.before ?? (beforeBuf ? normalizeText(beforeBuf.toString('utf8')) : '');
+      if (!verifyManagedContent(beforeText).managed) {
+        throw new Error(
+          `Refusing to delete unmanaged file "${f.relPath}" (missing playwright-harness-kit ownership marker)`
+        );
+      }
       return {
         path: f.path,
-        before: f.raw ?? (existsSync(f.path) ? readFileSync(f.path) : null),
+        before: beforeBuf,
         after: null,
       };
     }
@@ -472,9 +582,19 @@ export function applyBuild(files, { dryRun = false, force = false, io } = {}) {
       .filter((s) => !writes.some((w) => w.relPath === s.relPath))
       .map((s) => s.relPath);
     const nextManaged = [...new Set([...activeManagedPaths, ...unprunedStalePaths])].sort();
+    const unprunedStaleRoots = unprunedStalePaths
+      .map((rel) => validateManagedManifestEntry(rel))
+      .filter((c) => c.ok)
+      .map((c) => c.targetRoot);
+    const nextTargetRoots = [
+      ...new Set([DEFAULT_SKILL_ROOT, ...(files.targetRoots || []), ...unprunedStaleRoots]),
+    ].sort();
     const manifestFullPath = safeJoin(root, MANAGED_MANIFEST_REL);
     const manifestBefore = existsSync(manifestFullPath) ? readFileSync(manifestFullPath) : null;
-    const manifestAfter = Buffer.from(`${JSON.stringify({ managedFiles: nextManaged }, null, 2)}\n`, 'utf8');
+    const manifestAfter = Buffer.from(
+      `${JSON.stringify({ targetRoots: nextTargetRoots, managedFiles: nextManaged }, null, 2)}\n`,
+      'utf8'
+    );
     if (writes.length > 0 || (manifestBefore !== null && !manifestBefore.equals(manifestAfter))) {
       ops.push({
         path: manifestFullPath,

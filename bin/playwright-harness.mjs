@@ -219,6 +219,9 @@ export function run(argv = process.argv.slice(2)) {
         `Note: ${planned.stale.length} stale generated skill file(s) detected: ${planned.stale.map((s) => s.relPath).join(', ')} (pass --prune to reconcile).`
       );
     }
+    for (const diag of planned.manifestDiagnostics || []) {
+      lines.push(`warning: ${diag}`);
+    }
     const diffs = planned
       .filter((f) => f.diff && ['create', 'update', 'prune', 'conflict'].includes(f.action))
       .map((f) => f.diff);
@@ -291,6 +294,9 @@ export function run(argv = process.argv.slice(2)) {
       '',
       `Note: ${planned.stale.length} stale generated skill file(s) remain on disk: ${planned.stale.map((s) => s.relPath).join(', ')} (run "playwright-harness build --prune" to remove).`
     );
+  }
+  for (const diag of planned.manifestDiagnostics || []) {
+    lines.push(`warning: ${diag}`);
   }
   return { code: 0, text: lines.join('\n'), data: payload, check, spec, files };
 }

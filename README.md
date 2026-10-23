@@ -51,9 +51,9 @@ npx github:RolePlayingTech/playwright-harness-kit prune [dir] [--dry-run] [--for
 
 ## 5-Minute Walkthrough: Runnable Offline Playwright Lab (`examples/offline-ui`)
 
-This repository ships two examples:
-- **`examples/offline-ui/`** — A self-contained, runnable offline Playwright mini-project with a local static UI (`app/index.html`), a fail-closed `ui-contract` fixture (`e2e/fixtures.ts` with `serviceWorkers: 'block'`), and an intentional broken vs. fixed UI toggle (`M-AUTH-01` & `M-UX-01`). Requires no external services and no LLM API keys.
-- **`examples/mumro-web/`** — Reference `.playwright-harness/spec.json` contract from the MUMRO production workspace (`ui-contract` + `integrated` tiers).
+This repository ships two examples with separate scenario catalogs so IDs never collide:
+- **`examples/offline-ui/`** (`DEMO-AUTH-01`, `DEMO-UX-01`) — A self-contained, runnable offline Playwright mini-project with a local static UI (`app/index.html`), a fail-closed `ui-contract` fixture (`e2e/fixtures.ts` with `serviceWorkers: 'block'` and HTTP + WebSocket default-deny routing), synthetic-data screenshot + 4-point visual rubric attachment (`testInfo.attach`), and an intentional broken vs. fixed UI toggle. Requires no external services and no LLM API keys.
+- **`examples/mumro-web/`** (`M-AUTH-01`, `M-UX-01`) — Reference `.playwright-harness/spec.json` contract from the MUMRO production workspace (`ui-contract` + `integrated` tiers).
 
 ### Step 1: Validate the contract and repository files
 
@@ -81,7 +81,7 @@ node bin/playwright-harness.mjs build examples/offline-ui --dry-run
 node bin/playwright-harness.mjs build examples/offline-ui --prune
 ```
 
-Each generated `SKILL.md` embeds a verifiable `<!-- playwright-harness-kit:managed sha256=... -->` marker and records managed paths in `.playwright-harness/.managed-manifest.json`. If a skill or `copySkillsTo` target is later removed from `spec.json`, `check` warns about the stale skill and `build --prune` (or `prune`) removes intact managed files while refusing to delete hand-edited skills without `--force` and never touching unrelated manual skills.
+Each generated `SKILL.md` embeds a verifiable `<!-- playwright-harness-kit:managed sha256=... -->` marker and records managed paths in `.playwright-harness/.managed-manifest.json` (`targetRoots` + `managedFiles`). If a skill or `copySkillsTo` target is later removed from `spec.json`, `check` warns about the stale skill and `build --prune` (or `prune`) removes intact managed files while refusing to delete hand-edited skills without `--force`, and structurally rejecting any untrusted or unmanaged path even when `--force` is passed.
 
 ### Step 3: Run the Playwright suite against the broken UI (`--broken`)
 
@@ -92,11 +92,14 @@ cd examples/offline-ui
 npm install
 npx playwright install chromium
 npm run test:e2e:broken
+# Or run the structured broken-mode verifier used in CI:
+npm run test:e2e:broken:verify
 ```
 
 In `broken` mode (`?mode=broken`):
-1. **`M-AUTH-01` fails**: Submitting the password recovery form when `POST /api/auth/password/forgot` returns HTTP `503` wipes the user's typed email address (`Expected: "qa-reset@example.invalid", Received: ""`) and schedules an unapproved background retry.
-2. **`M-UX-01` fails**: Even though `expect(page.getByRole('dialog')).toBeVisible()` passes in the ARIA tree, the drawer has a rigid `min-width: 540px` rule on a `390×844` mobile screen. The programmatic geometry invariant catches the horizontal overflow (`Document scrollWidth (540px) must not exceed mobile innerWidth (390px)`).
+1. **`DEMO-AUTH-01` fails**: Submitting the password recovery form when `POST /api/auth/password/forgot` returns HTTP `503` wipes the user's typed email address (`Expected: "qa-reset@example.invalid", Received: ""`) and schedules an unapproved background retry.
+2. **`DEMO-UX-01` fails**: Even though `expect(page.getByRole('dialog')).toBeVisible()` passes in the ARIA tree, the drawer has a rigid `min-width: 540px` rule on a `390×844` mobile screen. The test first captures and attaches `demo-ux-01-mobile-390x844-broken.png` + the 4-point visual rubric (`testInfo.attach`), and then the programmatic geometry invariant catches the horizontal overflow (`Document scrollWidth (540px) must not exceed mobile innerWidth (390px)`).
+3. **Default-deny HTTP + WebSocket guard passes**: Unmocked `fetch('https://analytics.example.com/ping')` and `new WebSocket('wss://realtime.example.com/socket')` attempts are blocked and recorded.
 
 ### Step 4: Run the Playwright suite against the repaired UI (`test:e2e:contract`)
 
@@ -105,9 +108,9 @@ npm run test:e2e:contract
 ```
 
 In `fixed` mode (default):
-- **`M-AUTH-01` passes**: `role="alert"` is visible, the typed email `"qa-reset@example.invalid"` is preserved, and `forgotPasswordCalls === 1`.
-- **`M-UX-01` passes**: `documentElement.scrollWidth <= window.innerWidth` (`390 <= 390`) and the `Close drawer` button's `boundingBox()` sits inside the `390px` viewport.
-- **Negative network boundary check passes**: An unmocked `fetch('https://analytics.example.com/ping')` is aborted (`blockedbyclient`) by the default-deny `ui-contract` fixture.
+- **`DEMO-AUTH-01` passes**: `role="alert"` is visible, the typed email `"qa-reset@example.invalid"` is preserved, and `forgotPasswordCalls === 1`.
+- **`DEMO-UX-01` passes**: Captures and attaches `demo-ux-01-mobile-390x844-fixed.png` + the 4-point visual review rubric (truncation, occlusion, alignment, contrast), and asserts `documentElement.scrollWidth <= window.innerWidth` (`390 <= 390`) and `Close drawer` button `boundingBox()` inside `390px`. Note that screenshot inspection (human or VLM) is non-deterministic and complements—never replaces—deterministic DOM geometry assertions.
+- **Negative HTTP & WebSocket boundary check passes**: Both `fetch('https://analytics.example.com/ping')` and `new WebSocket('wss://realtime.example.com/socket')` are aborted/closed and recorded by the default-deny `ui-contract` fixture.
 
 ---
 

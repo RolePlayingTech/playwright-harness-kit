@@ -424,6 +424,9 @@ export function checkSpec(spec, { rootDir = null, verifyFiles = false, staleSkil
     }
   }
 
+  for (const diag of staleSkills.diagnostics || []) {
+    warnings.push(diag);
+  }
   for (const stale of staleSkills) {
     if (stale.action === 'conflict') {
       warnings.push(

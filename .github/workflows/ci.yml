@@ -46,13 +46,9 @@ jobs:
         run: |
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: Verify intentional UI bugs fail the Playwright contract (broken mode)
+      - name: Verify intentional UI bugs fail the Playwright contract for expected reasons (broken mode)
         working-directory: examples/offline-ui
-        run: |
-          if npm run test:e2e:broken; then
-            echo "Expected broken mode to fail M-AUTH-01 and M-UX-01 assertions, but it passed"
-            exit 1
-          fi
+        run: npm run test:e2e:broken:verify
       - name: Verify repaired UI passes all Playwright contract assertions (fixed mode)
         working-directory: examples/offline-ui
         run: npm run test:e2e:contract
