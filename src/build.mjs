@@ -12,7 +12,7 @@ import {
   validateSkillName,
 } from './fs-safe.mjs';
 
-const MANAGED_MARKER_RE = /<!-- playwright-harness-kit:managed sha256=([a-f0-9]{64}) -->/;
+const MANAGED_MARKER_RE = /^<!-- playwright-harness-kit:managed sha256=([a-f0-9]{64}) -->$/m;
 const ZERO_HASH = '0'.repeat(64);
 const YAML_PLAIN_UNSAFE_RE = /[:#"'[\]{}&*!|>%@`\\]|^\s|\s$|^[-?:,]/;
 export const MANAGED_MANIFEST_REL = '.playwright-harness/.managed-manifest.json';
@@ -86,10 +86,15 @@ export function parseSkillFrontmatter(text) {
   return { ok: true, data, body: lines.slice(closeIdx + 1).join('\n') };
 }
 
-export function verifyManagedContent(text) {
+export function verifyManagedContent(text, expectedSkillName = null) {
   const normalized = normalizeText(text);
   const match = MANAGED_MARKER_RE.exec(normalized);
   if (!match) return { managed: false, unedited: false };
+  const frontmatter = parseSkillFrontmatter(normalized);
+  if (!frontmatter.ok) return { managed: false, unedited: false };
+  if (expectedSkillName && frontmatter.data.name !== expectedSkillName) {
+    return { managed: false, unedited: false };
+  }
   const recordedHash = match[1];
   const zeroed = normalized.replace(MANAGED_MARKER_RE, `<!-- playwright-harness-kit:managed sha256=${ZERO_HASH} -->`);
   const actualHash = sha256(zeroed);
@@ -165,6 +170,19 @@ ${steps.join('\n') || '1. No scenarios listed in `covers`. Add them in the spec.
 
 const DEFAULT_SKILL_ROOT = '.playwright-harness/skills';
 
+function findOverlappingTargetRoot(candidateRoot, existingRoots) {
+  for (const existing of existingRoots) {
+    if (existing === candidateRoot) continue;
+    if (
+      candidateRoot.startsWith(`${existing}/`) ||
+      existing.startsWith(`${candidateRoot}/`)
+    ) {
+      return existing;
+    }
+  }
+  return null;
+}
+
 export function validateManagedManifestEntry(rawItem, allowedRoots = null) {
   if (typeof rawItem !== 'string' || !rawItem.trim()) {
     return { ok: false, error: 'entry must be a non-empty string' };
@@ -182,6 +200,40 @@ export function validateManagedManifestEntry(rawItem, allowedRoots = null) {
       error: 'entry must match "<targetRoot>/<skill-name>/SKILL.md"',
     };
   }
+  const allowedSet =
+    allowedRoots instanceof Set
+      ? allowedRoots
+      : Array.isArray(allowedRoots)
+        ? new Set(allowedRoots)
+        : null;
+
+  if (allowedSet) {
+    for (const trustedRoot of allowedSet) {
+      if (normalized === trustedRoot || normalized.startsWith(`${trustedRoot}/`)) {
+        const relWithinRoot = normalized.slice(trustedRoot.length + 1);
+        const subParts = relWithinRoot.split('/');
+        if (subParts.length !== 2 || subParts[1] !== 'SKILL.md') {
+          return {
+            ok: false,
+            error: `entry "${normalized}" under target root "${trustedRoot}" must match "<targetRoot>/<skill-name>/SKILL.md" (got "${relWithinRoot}")`,
+          };
+        }
+        const skillName = subParts[0];
+        const nameErr = validateSkillName(skillName);
+        if (nameErr) {
+          return { ok: false, error: `invalid skill directory "${skillName}" (${nameErr})` };
+        }
+        if (trustedRoot !== DEFAULT_SKILL_ROOT) {
+          const rootErr = validateCopyTarget(trustedRoot);
+          if (rootErr) {
+            return { ok: false, error: `untrusted target root "${trustedRoot}" (${rootErr})` };
+          }
+        }
+        return { ok: true, relPath: normalized, targetRoot: trustedRoot, skillName };
+      }
+    }
+  }
+
   const skillName = parts[parts.length - 2];
   const nameErr = validateSkillName(skillName);
   if (nameErr) {
@@ -194,10 +246,10 @@ export function validateManagedManifestEntry(rawItem, allowedRoots = null) {
       return { ok: false, error: `untrusted target root "${targetRoot}" (${rootErr})` };
     }
   }
-  if (allowedRoots && !allowedRoots.has(targetRoot)) {
+  if (allowedSet && !allowedSet.has(targetRoot)) {
     return {
       ok: false,
-      error: `target root "${targetRoot}" is not in tracked targetRoots (${[...allowedRoots].join(', ')})`,
+      error: `target root "${targetRoot}" is not in tracked targetRoots (${[...allowedSet].join(', ')})`,
     };
   }
   return { ok: true, relPath: normalized, targetRoot, skillName };
@@ -227,23 +279,38 @@ export function readManagedManifest(root, currentTargetRoots = [DEFAULT_SKILL_RO
     diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}) must be a JSON object`);
     return { files: [], targetRoots: [...baseAllowedRoots], diagnostics };
   }
-  if (parsed.targetRoots !== undefined) {
-    if (!Array.isArray(parsed.targetRoots)) {
-      diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): "targetRoots" must be an array`);
+  const rawRootsField = parsed.targetRoots !== undefined ? parsed.targetRoots : parsed.skillTargets;
+  const rawRootsKey = parsed.targetRoots !== undefined ? 'targetRoots' : 'skillTargets';
+  if (rawRootsField !== undefined) {
+    if (!Array.isArray(rawRootsField)) {
+      diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): "${rawRootsKey}" must be an array`);
     } else {
-      for (const rawRoot of parsed.targetRoots) {
+      for (const rawRoot of rawRootsField) {
         if (typeof rawRoot !== 'string' || !rawRoot.trim()) {
           diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): invalid targetRoot ${JSON.stringify(rawRoot)}`);
           continue;
         }
         try {
           const normRoot = normalizeRelPath(rawRoot);
+          if (normRoot === 'SKILL.md' || normRoot.endsWith('/SKILL.md')) {
+            diagnostics.push(
+              `managed manifest (${MANAGED_MANIFEST_REL}): untrusted targetRoot "${rawRoot}" (targetRoot cannot be a SKILL.md file path)`
+            );
+            continue;
+          }
           if (normRoot !== DEFAULT_SKILL_ROOT) {
             const rootErr = validateCopyTarget(normRoot);
             if (rootErr) {
               diagnostics.push(`managed manifest (${MANAGED_MANIFEST_REL}): untrusted targetRoot "${rawRoot}" (${rootErr})`);
               continue;
             }
+          }
+          const overlapping = findOverlappingTargetRoot(normRoot, baseAllowedRoots);
+          if (overlapping) {
+            diagnostics.push(
+              `managed manifest (${MANAGED_MANIFEST_REL}): untrusted targetRoot "${rawRoot}" (overlaps with existing targetRoot "${overlapping}")`
+            );
+            continue;
           }
           baseAllowedRoots.add(normRoot);
         } catch (error) {
@@ -341,7 +408,7 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
       if (!existsSync(fullSkillPath)) continue;
       try {
         const text = normalizeText(readFileSync(fullSkillPath, 'utf8'));
-        const ownership = verifyManagedContent(text);
+        const ownership = verifyManagedContent(text, entry.name);
         if (ownership.managed) {
           candidateRelPaths.add(relPath);
         }
@@ -367,7 +434,7 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
     if (!existsSync(fullPath)) continue;
     const raw = readFileSync(fullPath);
     const current = normalizeText(raw.toString('utf8'));
-    const ownership = verifyManagedContent(current);
+    const ownership = verifyManagedContent(current, structCheck.skillName);
     if (!ownership.managed) {
       diagnostics.push(
         `managed manifest (${MANAGED_MANIFEST_REL}): ignoring unmanaged file "${relPath}" (missing playwright-harness-kit ownership marker; refusing to delete even with --force)`
@@ -413,6 +480,7 @@ export function findStaleSkills(spec, dir, { force = false } = {}) {
     }
   }
   Object.defineProperty(stale, 'diagnostics', { value: diagnostics, enumerable: false });
+  Object.defineProperty(stale, 'allowedRoots', { value: [...allowedRootsSet], enumerable: false });
   return stale;
 }
 
@@ -512,6 +580,10 @@ export function planBuild(spec, dir, { force = false, prune = false } = {}) {
 
   Object.defineProperty(files, 'root', { value: root, enumerable: false });
   Object.defineProperty(files, 'targetRoots', { value: targetRoots, enumerable: false });
+  Object.defineProperty(files, 'allowedRoots', {
+    value: stale.allowedRoots || targetRoots,
+    enumerable: false,
+  });
   Object.defineProperty(files, 'stale', { value: stale, enumerable: false });
   Object.defineProperty(files, 'manifestDiagnostics', {
     value: stale.diagnostics || [],
@@ -542,19 +614,20 @@ export function applyBuild(files, { dryRun = false, force = false, io } = {}) {
     throw new Error(`Refusing to overwrite conflicting skill file(s): ${details}`);
   }
   const root = files.root;
+  const allowedRoots = files.allowedRoots ? new Set(files.allowedRoots) : null;
   const writes = files.filter(
     (f) => f.action === 'create' || f.action === 'update' || f.action === 'prune' || (force && f.action === 'conflict')
   );
 
   const ops = writes.map((f) => {
     if (f.action === 'prune' || (force && f.action === 'conflict' && f.isStale)) {
-      const structCheck = validateManagedManifestEntry(f.relPath);
+      const structCheck = validateManagedManifestEntry(f.relPath, allowedRoots);
       if (!structCheck.ok) {
         throw new Error(`Refusing to delete untrusted path "${f.relPath}": ${structCheck.error}`);
       }
       const beforeBuf = f.raw ?? (existsSync(f.path) ? readFileSync(f.path) : null);
       const beforeText = f.before ?? (beforeBuf ? normalizeText(beforeBuf.toString('utf8')) : '');
-      if (!verifyManagedContent(beforeText).managed) {
+      if (!verifyManagedContent(beforeText, structCheck.skillName).managed) {
         throw new Error(
           `Refusing to delete unmanaged file "${f.relPath}" (missing playwright-harness-kit ownership marker)`
         );
@@ -565,6 +638,9 @@ export function applyBuild(files, { dryRun = false, force = false, io } = {}) {
         after: null,
       };
     }
+    if (typeof f.contents !== 'string') {
+      throw new Error(`Refusing to write non-string content for "${f.relPath || f.path}".`);
+    }
     const crlf = f.raw !== null && f.raw !== undefined && f.raw.includes('\r\n');
     const encoded = Buffer.from(crlf ? f.contents.replace(/\n/g, '\r\n') : f.contents, 'utf8');
     return {
@@ -574,7 +650,7 @@ export function applyBuild(files, { dryRun = false, force = false, io } = {}) {
     };
   });
 
-  if (root && files.length > 0) {
+  if (root && Array.isArray(files.targetRoots)) {
     const activeManagedPaths = files
       .filter((f) => !f.isStale && f.action !== 'prune')
       .map((f) => f.relPath);
@@ -583,7 +659,7 @@ export function applyBuild(files, { dryRun = false, force = false, io } = {}) {
       .map((s) => s.relPath);
     const nextManaged = [...new Set([...activeManagedPaths, ...unprunedStalePaths])].sort();
     const unprunedStaleRoots = unprunedStalePaths
-      .map((rel) => validateManagedManifestEntry(rel))
+      .map((rel) => validateManagedManifestEntry(rel, allowedRoots))
       .filter((c) => c.ok)
       .map((c) => c.targetRoot);
     const nextTargetRoots = [
