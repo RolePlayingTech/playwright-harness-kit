@@ -182,11 +182,13 @@ test('never deletes README.md, package.json, src/app.js, docs/notes.md, nested n
     const spec1 = normalizeSpec(RAW_SPEC);
     applyBuild(planBuild(spec1, dir));
 
-    // Create unrelated repository files and a manual skill without ownership header
+    // Create unrelated repository files and manual/non-managed skills
     mkdirSync(join(dir, 'src'), { recursive: true });
     mkdirSync(join(dir, 'docs'), { recursive: true });
     mkdirSync(join(dir, '.claude/skills/nested/sub'), { recursive: true });
     mkdirSync(join(dir, '.claude/skills/manual-unmanaged'), { recursive: true });
+    mkdirSync(join(dir, '.claude/skills/prose-marker-note'), { recursive: true });
+    mkdirSync(join(dir, '.claude/skills/mismatched-name'), { recursive: true });
 
     const protectedPaths = [
       'README.md',
@@ -195,18 +197,30 @@ test('never deletes README.md, package.json, src/app.js, docs/notes.md, nested n
       'docs/notes.md',
       '.claude/skills/nested/sub/SKILL.md',
       '.claude/skills/manual-unmanaged/SKILL.md',
+      '.claude/skills/prose-marker-note/SKILL.md',
+      '.claude/skills/mismatched-name/SKILL.md',
     ];
+    const expectedContents = new Map();
     for (const rel of protectedPaths) {
-      writeFileSync(join(dir, rel), `unmanaged content of ${rel}\n`, 'utf8');
+      let body = `unmanaged content of ${rel}\n`;
+      if (rel === '.claude/skills/prose-marker-note/SKILL.md') {
+        // Contains marker string in prose without valid SKILL.md YAML frontmatter
+        body = `# Notes on markers\n\nExample: <!-- playwright-harness-kit:managed sha256=${'0'.repeat(64)} -->\n`;
+      } else if (rel === '.claude/skills/mismatched-name/SKILL.md') {
+        // Valid frontmatter and marker line, but frontmatter name does not match directory name
+        body = `---\nname: other-skill\ndescription: Use when testing.\n---\n\n# other-skill\n\n<!-- playwright-harness-kit:managed sha256=${'0'.repeat(64)} -->\n`;
+      }
+      expectedContents.set(rel, body);
+      writeFileSync(join(dir, rel), body, 'utf8');
     }
 
-    // Tamper with .playwright-harness/.managed-manifest.json by injecting all protected paths
+    // Tamper with .playwright-harness/.managed-manifest.json by injecting all protected paths and overlapping/untrusted targetRoots
     const manifestPath = join(dir, '.playwright-harness/.managed-manifest.json');
     writeFileSync(
       manifestPath,
       JSON.stringify(
         {
-          targetRoots: ['.playwright-harness/skills', '.claude/skills', '.cursor/skills', 'src'],
+          targetRoots: ['.playwright-harness/skills', '.claude/skills', '.claude/skills/nested', '.cursor/skills', 'src'],
           managedFiles: [
             ...protectedPaths,
             '.claude/skills/verify-ui-contract/SKILL.md',
@@ -234,26 +248,53 @@ test('never deletes README.md, package.json, src/app.js, docs/notes.md, nested n
     });
 
     const planned = planBuild(spec2, dir, { prune: true, force: true });
-    // Diagnostics must flag every untrusted/unmanaged manifest entry
+    // Diagnostics must flag every untrusted/unmanaged manifest entry and overlapping targetRoot
     assert.ok(planned.manifestDiagnostics.some((d) => d.includes('README.md')));
     assert.ok(planned.manifestDiagnostics.some((d) => d.includes('package.json')));
     assert.ok(planned.manifestDiagnostics.some((d) => d.includes('src/app.js')));
     assert.ok(planned.manifestDiagnostics.some((d) => d.includes('docs/notes.md')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/nested')));
     assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/nested/sub/SKILL.md')));
     assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/manual-unmanaged/SKILL.md')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/prose-marker-note/SKILL.md')));
+    assert.ok(planned.manifestDiagnostics.some((d) => d.includes('.claude/skills/mismatched-name/SKILL.md')));
 
     applyBuild(planned, { force: true });
 
     // Every single protected file must survive untouched
     for (const rel of protectedPaths) {
       assert.equal(existsSync(join(dir, rel)), true, `Protected file "${rel}" must survive build --prune --force`);
-      assert.equal(readFileSync(join(dir, rel), 'utf8'), `unmanaged content of ${rel}\n`);
+      assert.equal(readFileSync(join(dir, rel), 'utf8'), expectedContents.get(rel));
     }
 
     // Legitimate stale managed skills were still pruned
     assert.equal(existsSync(join(dir, '.claude/skills/verify-ui-contract/SKILL.md')), false);
     assert.equal(existsSync(join(dir, '.cursor/skills/verify-ui-contract/SKILL.md')), false);
     assert.equal(existsSync(join(dir, '.playwright-harness/skills/verify-ui-contract/SKILL.md')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails safely with actionable diagnostics when .managed-manifest.json is malformed JSON or has non-array fields', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pw-harness-manifest-malformed-'));
+  try {
+    const spec = normalizeSpec(RAW_SPEC);
+    mkdirSync(join(dir, '.playwright-harness'), { recursive: true });
+    writeFileSync(join(dir, 'README.md'), '# Project README\n', 'utf8');
+
+    const manifestPath = join(dir, '.playwright-harness/.managed-manifest.json');
+    writeFileSync(manifestPath, '{broken json', 'utf8');
+    const plannedBroken = planBuild(spec, dir, { prune: true, force: true });
+    assert.ok(plannedBroken.manifestDiagnostics.some((d) => d.includes('is not valid JSON')));
+    applyBuild(plannedBroken, { force: true });
+    assert.equal(existsSync(join(dir, 'README.md')), true);
+
+    writeFileSync(manifestPath, JSON.stringify({ targetRoots: 'not-an-array', managedFiles: 'not-an-array' }), 'utf8');
+    const plannedWrongTypes = planBuild(spec, dir, { prune: true, force: true });
+    assert.ok(plannedWrongTypes.manifestDiagnostics.some((d) => d.includes('"targetRoots" must be an array')));
+    assert.ok(plannedWrongTypes.manifestDiagnostics.some((d) => d.includes('"managedFiles" must be an array')));
+    assert.equal(existsSync(join(dir, 'README.md')), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

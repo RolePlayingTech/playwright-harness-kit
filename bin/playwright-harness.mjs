@@ -197,6 +197,7 @@ export function run(argv = process.argv.slice(2)) {
       pruned: flags.prune,
       counts,
       staleCount: planned.stale.length,
+      manifestDiagnostics: planned.manifestDiagnostics || [],
       files: planned.map((f) => ({
         path: f.relPath,
         fullPath: f.path,
@@ -241,6 +242,7 @@ export function run(argv = process.argv.slice(2)) {
       forced: false,
       pruned: flags.prune,
       counts,
+      manifestDiagnostics: planned.manifestDiagnostics || [],
       conflicts: planned
         .filter((f) => f.action === 'conflict')
         .map((f) => ({ path: f.relPath, fullPath: f.path, reason: f.reason, diff: f.diff })),
@@ -248,11 +250,15 @@ export function run(argv = process.argv.slice(2)) {
     const conflictLines = planned
       .filter((f) => f.action === 'conflict')
       .map((f) => `  - ${f.relPath}: ${f.reason}`);
+    const diagLines = (planned.manifestDiagnostics || []).map((diag) => `warning: ${diag}`);
+    const textLines = [
+      `Refusing to build; ${counts.conflict} conflicting file(s) would be overwritten or removed:`,
+      ...conflictLines,
+      ...diagLines,
+    ];
     return {
       code: 1,
-      text: flags.json
-        ? formatJson(payload)
-        : `Refusing to build; ${counts.conflict} conflicting file(s) would be overwritten or removed:\n${conflictLines.join('\n')}`,
+      text: flags.json ? formatJson(payload) : textLines.join('\n'),
       data: payload,
       check,
       spec,
@@ -272,6 +278,7 @@ export function run(argv = process.argv.slice(2)) {
     prunedCount,
     counts,
     staleCount: flags.prune ? 0 : planned.stale.length,
+    manifestDiagnostics: planned.manifestDiagnostics || [],
     files: files.map((f) => ({
       path: f.relPath,
       fullPath: f.path,
