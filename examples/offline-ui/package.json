@@ -1,0 +1,18 @@
+{
+  "name": "playwright-harness-offline-ui-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-contained offline Playwright ui-contract & geometry lab for playwright-harness-kit and MUMRO Academy Lesson 15.",
+  "scripts": {
+    "test:e2e:contract": "node run-e2e.mjs",
+    "test:e2e:broken": "node run-e2e.mjs --broken",
+    "test:e2e:broken:verify": "node run-e2e.mjs --broken --verify-broken",
+    "harness:explain": "node ../../bin/playwright-harness.mjs explain . --verify-files",
+    "harness:check": "node ../../bin/playwright-harness.mjs check . --strict --verify-files",
+    "harness:build": "node ../../bin/playwright-harness.mjs build . --prune"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

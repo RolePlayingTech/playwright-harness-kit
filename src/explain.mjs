@@ -26,6 +26,7 @@ export function explainData(spec, check) {
       covers: sk.covers,
     })),
     uncoveredScenarios,
+    evidence: check.evidence || [],
     errors: check.errors,
     warnings: check.warnings,
   };
@@ -90,6 +91,13 @@ export function formatExplain(spec, check) {
     lines.push(`  ${data.uncoveredScenarios.join(', ')}`);
   } else {
     lines.push('  (none — all scenarios are referenced by at least one skill)');
+  }
+
+  if (data.evidence.length) {
+    lines.push('', 'Evidence scope (static contract vs. runtime browser execution)');
+    for (const item of data.evidence) {
+      lines.push(`  [${item.status.padEnd(12)}] ${item.policy}: ${item.detail}`);
+    }
   }
 
   if (check.errors.length) {

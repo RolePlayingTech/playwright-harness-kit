@@ -2,12 +2,12 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { applyBuild, planBuild } from '../src/build.mjs';
+import { applyBuild, findStaleSkills, planBuild } from '../src/build.mjs';
 import { checkSpec } from '../src/check.mjs';
 import { explainData, formatExplain } from '../src/explain.mjs';
 import { loadSpec, specPath } from '../src/spec.mjs';
 
-const COMMANDS = ['explain', 'check', 'build', 'help'];
+const COMMANDS = ['explain', 'check', 'build', 'prune', 'help'];
 
 function help() {
   return `playwright-harness-kit: record, explain and check a Playwright & multimodal browser verification contract.
@@ -15,34 +15,44 @@ function help() {
 Usage: playwright-harness <command> [dir] [options]
 
 Commands:
-  explain   Print tiers, scenario IDs, session policy, visual rubrics and skill coverage.
+  explain   Print tiers, scenario IDs, session policy, visual rubrics, evidence states and skill coverage.
   check     Validate the verification contract (exit 1 on errors, or warnings with --strict).
-  build     Write SKILL.md files from spec.skills (--dry-run previews actions and diffs).
+            Default check validates JSON declarations; add --verify-files to audit repo files/scripts.
+  build     Write SKILL.md files from spec.skills (--dry-run previews actions and diffs, --prune removes stale skills).
+  prune     Reconcile and remove stale managed SKILL.md files removed from spec.json (--dry-run previews).
   help      Show this help.
 
 Options:
-  --strict    check/explain: treat warnings as failures (exit 1).
-  --dry-run   build: preview create/update/unchanged/conflict status and diffs without writing.
-  --force     build: overwrite conflicting hand-edited or unmanaged SKILL.md files.
-  --json      Output machine-readable JSON (explain, check, build).
-  -h, --help  Show this help.
+  --strict        check/explain: treat warnings as failures (exit 1).
+  --verify-files  check/explain: verify declared .spec.ts files, scenario IDs, npm scripts, and .gitignore on disk.
+  --prune         build: remove intact stale managed SKILL.md files that are no longer in spec.json.
+  --dry-run       build/prune: preview create/update/prune/unchanged/conflict status and diffs without writing.
+  --force         build/prune: overwrite or remove conflicting hand-edited SKILL.md files.
+  --json          Output machine-readable JSON (explain, check, build, prune).
+  -h, --help      Show this help.
+
+Exit codes:
+  0  Success (validation passed / build or dry-run succeeded without conflicts).
+  1  Validation failure, conflict, or CLI error.
 
 Typical flow:
-  playwright-harness explain examples/mumro-web
-  playwright-harness check examples/mumro-web --strict
-  playwright-harness build examples/mumro-web --dry-run
-  playwright-harness build examples/mumro-web
+  playwright-harness explain examples/offline-ui
+  playwright-harness check examples/offline-ui --strict --verify-files
+  playwright-harness build examples/offline-ui --dry-run
+  playwright-harness build examples/offline-ui --prune
 `;
 }
 
 export function parse(argv) {
-  const flags = { dryRun: false, force: false, strict: false, json: false };
+  const flags = { dryRun: false, force: false, strict: false, json: false, verifyFiles: false, prune: false };
   const positionals = [];
   for (const arg of argv) {
     if (arg === '--dry-run') flags.dryRun = true;
     else if (arg === '--force') flags.force = true;
     else if (arg === '--strict') flags.strict = true;
     else if (arg === '--json') flags.json = true;
+    else if (arg === '--verify-files') flags.verifyFiles = true;
+    else if (arg === '--prune') flags.prune = true;
     else if (arg === '-h' || arg === '--help') positionals.unshift('help');
     else if (arg.startsWith('-')) throw new Error(`Unknown option ${arg}`);
     else positionals.push(arg);
@@ -51,8 +61,15 @@ export function parse(argv) {
   if (positionals.length > 2) {
     throw new Error(`Unexpected argument "${positionals[2]}". Usage: playwright-harness <command> [dir] [options]`);
   }
-  if ((flags.dryRun || flags.force) && command !== 'build' && command !== 'help') {
-    throw new Error(`Option ${flags.dryRun ? '--dry-run' : '--force'} is only valid with "build".`);
+  if ((flags.dryRun || flags.force || flags.prune) && !['build', 'prune', 'help'].includes(command)) {
+    const badFlag = flags.dryRun ? '--dry-run' : flags.force ? '--force' : '--prune';
+    throw new Error(`Option ${badFlag} is only valid with "build" or "prune".`);
+  }
+  if (flags.verifyFiles && !['check', 'explain', 'help'].includes(command)) {
+    throw new Error('Option --verify-files is only valid with "check" or "explain".');
+  }
+  if (command === 'prune') {
+    flags.prune = true;
   }
   return { command, dir: resolve(positionals[1] || '.'), flags };
 }
@@ -73,12 +90,17 @@ export function run(argv = process.argv.slice(2)) {
     throw new Error(`No ${path}. Write .playwright-harness/spec.json first.`);
   }
   const spec = loadSpec(dir);
-  const check = checkSpec(spec);
+  const staleSkills = findStaleSkills(spec, dir);
+  const check = checkSpec(spec, {
+    rootDir: dir,
+    verifyFiles: flags.verifyFiles,
+    staleSkills: command === 'check' || command === 'explain' ? staleSkills : [],
+  });
   const passed = check.ok && (!flags.strict || check.warnings.length === 0);
 
   if (command === 'explain') {
     const data = explainData(spec, check);
-    const payload = { ...data, strict: flags.strict, passed };
+    const payload = { ...data, strict: flags.strict, verifyFiles: flags.verifyFiles, passed };
     return {
       code: passed ? 0 : 1,
       text: flags.json ? formatJson(payload) : formatExplain(spec, check),
@@ -93,17 +115,20 @@ export function run(argv = process.argv.slice(2)) {
     const payload = {
       ok: passed,
       strict: flags.strict,
+      verifyFiles: flags.verifyFiles,
       passed,
       errorCount: check.errors.length,
       warningCount: check.warnings.length,
       errors: check.errors,
       warnings: check.warnings,
+      evidence: check.evidence,
       summary: {
         name: spec.name,
         tiers: Object.keys(spec.tiers).length,
         scenarios: spec.scenarios.length,
         skills: spec.skills.length,
         uncoveredScenarios: data.uncoveredScenarios.length,
+        staleSkills: staleSkills.length,
       },
     };
     if (flags.json) {
@@ -111,11 +136,19 @@ export function run(argv = process.argv.slice(2)) {
     }
     const lines = [];
     if (passed) {
-      lines.push(
-        flags.strict
-          ? 'PASS: Playwright verification spec is internally consistent (strict mode, 0 warnings).'
-          : 'PASS: Playwright verification spec is internally consistent.'
-      );
+      if (flags.verifyFiles) {
+        lines.push(
+          flags.strict
+            ? 'PASS: Playwright verification spec and repository files verified (strict mode, 0 warnings).'
+            : 'PASS: Playwright verification spec and repository files verified.'
+        );
+      } else {
+        lines.push(
+          flags.strict
+            ? 'PASS: Playwright verification spec is internally consistent (strict mode, 0 warnings).'
+            : 'PASS: Playwright verification spec is internally consistent.'
+        );
+      }
     } else if (!check.ok) {
       lines.push('FAIL:');
       for (const error of check.errors) lines.push(`  - ${error}`);
@@ -123,6 +156,12 @@ export function run(argv = process.argv.slice(2)) {
       lines.push(`FAIL (strict mode: ${check.warnings.length} warning(s)):`);
     }
     for (const warning of check.warnings) lines.push(`warning: ${warning}`);
+    if (flags.verifyFiles && check.evidence?.length) {
+      lines.push('', 'Evidence summary:');
+      for (const item of check.evidence) {
+        lines.push(`  [${item.status.padEnd(12)}] ${item.policy}: ${item.detail}`);
+      }
+    }
     return { code: passed ? 0 : 1, text: lines.join('\n'), data: payload, check, spec };
   }
 
@@ -131,6 +170,7 @@ export function run(argv = process.argv.slice(2)) {
       ok: false,
       dryRun: flags.dryRun,
       forced: flags.force,
+      pruned: flags.prune,
       errors: check.errors,
       warnings: check.warnings,
     };
@@ -145,7 +185,7 @@ export function run(argv = process.argv.slice(2)) {
     };
   }
 
-  const planned = planBuild(spec, dir, { force: flags.force });
+  const planned = planBuild(spec, dir, { force: flags.force, prune: flags.prune });
   const counts = planned.counts;
   const hasConflicts = counts.conflict > 0 && !flags.force;
 
@@ -154,7 +194,10 @@ export function run(argv = process.argv.slice(2)) {
       ok: !hasConflicts,
       dryRun: true,
       forced: flags.force,
+      pruned: flags.prune,
       counts,
+      staleCount: planned.stale.length,
+      manifestDiagnostics: planned.manifestDiagnostics || [],
       files: planned.map((f) => ({
         path: f.relPath,
         fullPath: f.path,
@@ -166,12 +209,22 @@ export function run(argv = process.argv.slice(2)) {
     if (flags.json) {
       return { code: hasConflicts ? 1 : 0, text: formatJson(payload), data: payload, check, spec, files: planned };
     }
+    const prunePart = flags.prune || counts.prune > 0 ? `, prune: ${counts.prune}` : '';
     const lines = [
-      `Dry run (nothing written) — create: ${counts.create}, update: ${counts.update}, unchanged: ${counts.unchanged}, conflict: ${counts.conflict}:`,
+      `Dry run (nothing written) — create: ${counts.create}, update: ${counts.update}${prunePart}, unchanged: ${counts.unchanged}, conflict: ${counts.conflict}:`,
       ...planned.map((file) => `  [${file.action.padEnd(9)}] ${file.relPath} (${file.reason})`),
     ];
+    if (!flags.prune && planned.stale.length > 0) {
+      lines.push(
+        '',
+        `Note: ${planned.stale.length} stale generated skill file(s) detected: ${planned.stale.map((s) => s.relPath).join(', ')} (pass --prune to reconcile).`
+      );
+    }
+    for (const diag of planned.manifestDiagnostics || []) {
+      lines.push(`warning: ${diag}`);
+    }
     const diffs = planned
-      .filter((f) => f.diff && ['create', 'update', 'conflict'].includes(f.action))
+      .filter((f) => f.diff && ['create', 'update', 'prune', 'conflict'].includes(f.action))
       .map((f) => f.diff);
     if (diffs.length) {
       lines.push('', ...diffs);
@@ -187,7 +240,9 @@ export function run(argv = process.argv.slice(2)) {
       ok: false,
       dryRun: false,
       forced: false,
+      pruned: flags.prune,
       counts,
+      manifestDiagnostics: planned.manifestDiagnostics || [],
       conflicts: planned
         .filter((f) => f.action === 'conflict')
         .map((f) => ({ path: f.relPath, fullPath: f.path, reason: f.reason, diff: f.diff })),
@@ -195,11 +250,15 @@ export function run(argv = process.argv.slice(2)) {
     const conflictLines = planned
       .filter((f) => f.action === 'conflict')
       .map((f) => `  - ${f.relPath}: ${f.reason}`);
+    const diagLines = (planned.manifestDiagnostics || []).map((diag) => `warning: ${diag}`);
+    const textLines = [
+      `Refusing to build; ${counts.conflict} conflicting file(s) would be overwritten or removed:`,
+      ...conflictLines,
+      ...diagLines,
+    ];
     return {
       code: 1,
-      text: flags.json
-        ? formatJson(payload)
-        : `Refusing to build; ${counts.conflict} conflicting file(s) would be overwritten:\n${conflictLines.join('\n')}`,
+      text: flags.json ? formatJson(payload) : textLines.join('\n'),
       data: payload,
       check,
       spec,
@@ -209,12 +268,17 @@ export function run(argv = process.argv.slice(2)) {
 
   const files = applyBuild(planned, { dryRun: false, force: flags.force });
   const writtenCount = counts.create + counts.update;
+  const prunedCount = counts.prune;
   const payload = {
     ok: true,
     dryRun: false,
     forced: flags.force,
+    pruned: flags.prune,
     written: writtenCount,
+    prunedCount,
     counts,
+    staleCount: flags.prune ? 0 : planned.stale.length,
+    manifestDiagnostics: planned.manifestDiagnostics || [],
     files: files.map((f) => ({
       path: f.relPath,
       fullPath: f.path,
@@ -225,12 +289,22 @@ export function run(argv = process.argv.slice(2)) {
   if (flags.json) {
     return { code: 0, text: formatJson(payload), data: payload, check, spec, files };
   }
+  const pruneSummary = flags.prune || prunedCount > 0 ? `, prune: ${prunedCount}` : '';
   const lines = [
-    writtenCount > 0
-      ? `Wrote ${writtenCount} skill file(s) (create: ${counts.create}, update: ${counts.update}, unchanged: ${counts.unchanged}):`
+    writtenCount + prunedCount > 0
+      ? `Processed ${writtenCount + prunedCount} skill file(s) (create: ${counts.create}, update: ${counts.update}${pruneSummary}, unchanged: ${counts.unchanged}):`
       : `All ${files.length} skill file(s) already up to date:`,
     ...files.map((file) => `  [${file.action.padEnd(9)}] ${file.relPath}`),
   ];
+  if (!flags.prune && planned.stale.length > 0) {
+    lines.push(
+      '',
+      `Note: ${planned.stale.length} stale generated skill file(s) remain on disk: ${planned.stale.map((s) => s.relPath).join(', ')} (run "playwright-harness build --prune" to remove).`
+    );
+  }
+  for (const diag of planned.manifestDiagnostics || []) {
+    lines.push(`warning: ${diag}`);
+  }
   return { code: 0, text: lines.join('\n'), data: payload, check, spec, files };
 }
 

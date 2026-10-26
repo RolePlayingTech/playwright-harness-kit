@@ -1,5 +1,6 @@
 node_modules/
 .playwright-harness/skills/
+.playwright-harness/.managed-manifest.json
 .agents/
 .claude/
 *.log

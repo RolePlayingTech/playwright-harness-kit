@@ -1,0 +1,61 @@
+{
+  "name": "offline-ui-verification",
+  "purpose": "Self-contained offline Playwright ui-contract, DOM geometry, and screenshot rubric verification lab.",
+  "copySkillsTo": [".claude/skills"],
+  "tiers": {
+    "ui-contract": {
+      "command": "npm run test:e2e:contract",
+      "origin": "https://offline-ui-contract.invalid",
+      "networkPolicy": "deny-unhandled",
+      "purpose": "Fast, deterministic verification of password recovery error handling and 390x844 mobile drawer geometry without external services."
+    }
+  },
+  "authSessionPolicy": {
+    "singleUseRefreshRotation": true,
+    "allowSharedStorageState": false,
+    "rationale": "Concurrent workers sharing one single-use refresh token trigger reuse detection and revoke the session family."
+  },
+  "artifactHygiene": {
+    "traceMode": "on-first-retry",
+    "gitIgnore": ["playwright-report/", "test-results/", "playwright/.auth/"],
+    "forbidLiveMutations": true
+  },
+  "scenarios": [
+    {
+      "id": "DEMO-AUTH-01",
+      "title": "Password recovery HTTP 503 preserves typed email and makes zero background retries",
+      "tier": "ui-contract",
+      "spec": "e2e/ui-contract.spec.ts",
+      "locatorStrategy": "role-and-label-first",
+      "visualCheck": { "required": false }
+    },
+    {
+      "id": "DEMO-UX-01",
+      "title": "Mobile release drawer fits 390x844 viewport without horizontal overflow or off-screen controls",
+      "tier": "ui-contract",
+      "spec": "e2e/ui-contract.spec.ts",
+      "locatorStrategy": "role-and-label-first",
+      "visualCheck": {
+        "required": true,
+        "viewports": [{ "width": 390, "height": 844 }, { "width": 1280, "height": 800 }],
+        "programmaticInvariants": [
+          "documentElement.scrollWidth <= window.innerWidth",
+          "dialog close button inside viewport boundingBox"
+        ],
+        "multimodalRubric": [
+          "Truncation: Heading and schedule row text remain uncut with no unplanned ellipsis",
+          "Occlusion: Close drawer button and status badge are not overlapped or clipped by adjacent elements",
+          "Alignment: Drawer header controls and schedule row align cleanly within the 390px card padding",
+          "Contrast: Alert banner (#991b1b on #fef2f2) and primary action button (#ffffff on #0f172a) remain legible"
+        ]
+      }
+    }
+  ],
+  "skills": [
+    {
+      "name": "verify-browser-scenarios",
+      "description": "Verify UI-contract Playwright scenarios with ARIA locators, DOM geometry invariants, and targeted screenshots. Use when an issue or task packet references DEMO-AUTH-01 or DEMO-UX-01.",
+      "covers": ["DEMO-AUTH-01", "DEMO-UX-01"]
+    }
+  ]
+}
